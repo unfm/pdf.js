@@ -2198,6 +2198,7 @@ if (typeof PDFJSDev === "undefined" || PDFJSDev.test("GENERIC")) {
   ];
   // eslint-disable-next-line no-var
   var validateFileURL = function (file) {
+    return;
     if (!file) {
       return;
     }
