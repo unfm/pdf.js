@@ -53,7 +53,6 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BUILD_DIR = "build/";
 const L10N_DIR = "l10n/";
 const TEST_DIR = "test/";
-const EXTENSION_SRC_DIR = "extensions/";
 
 const BASELINE_DIR = BUILD_DIR + "baseline/";
 const MOZCENTRAL_BASELINE_DIR = BUILD_DIR + "mozcentral.baseline/";
@@ -1278,26 +1277,31 @@ gulp.task(
   )
 );
 
-function preprocessDefaultPreferences(content) {
+function createDefaultPrefsFile() {
+  const defaultFileName = "PdfJsDefaultPrefs.js",
+    overrideFileName = "PdfJsOverridePrefs.js";
   const licenseHeader = fs.readFileSync("./src/license_header.js").toString();
 
   const MODIFICATION_WARNING =
-    "//\n// THIS FILE IS GENERATED AUTOMATICALLY, DO NOT EDIT MANUALLY!\n//\n";
+    "// THIS FILE IS GENERATED AUTOMATICALLY, DO NOT EDIT MANUALLY!\n//\n" +
+    `// Any overrides should be placed in \`${overrideFileName}\`.\n`;
 
-  const bundleDefines = {
-    ...DEFINES,
-    DEFAULT_PREFERENCES: getDefaultPreferences("mozcentral/"),
-  };
+  const prefs = getDefaultPreferences("mozcentral/");
+  const buf = [];
 
-  content = preprocessPDFJSCode(
-    {
-      rootPath: __dirname,
-      defines: bundleDefines,
-    },
-    content
-  );
+  for (const name in prefs) {
+    let value = prefs[name];
 
-  return licenseHeader + "\n" + MODIFICATION_WARNING + "\n" + content + "\n";
+    if (typeof value === "string") {
+      value = `"${value}"`;
+    }
+    buf.push(`pref("pdfjs.${name}", ${value});`);
+  }
+  buf.sort();
+  buf.unshift(licenseHeader, MODIFICATION_WARNING);
+  buf.push(`\n#include ${overrideFileName}\n`);
+
+  return createStringSource(defaultFileName, buf.join("\n"));
 }
 
 function replaceMozcentralCSS() {
@@ -1325,8 +1329,7 @@ gulp.task(
         MOZCENTRAL_EXTENSION_DIR = MOZCENTRAL_DIR + "browser/extensions/pdfjs/",
         MOZCENTRAL_CONTENT_DIR = MOZCENTRAL_EXTENSION_DIR + "content/",
         MOZCENTRAL_L10N_DIR =
-          MOZCENTRAL_DIR + "browser/locales/en-US/pdfviewer/",
-        FIREFOX_CONTENT_DIR = EXTENSION_SRC_DIR + "/firefox/content/";
+          MOZCENTRAL_DIR + "browser/locales/en-US/pdfviewer/";
 
       const MOZCENTRAL_WEB_FILES = [
         ...COMMON_WEB_FILES,
@@ -1401,12 +1404,7 @@ gulp.task(
         gulp
           .src("LICENSE", { encoding: false })
           .pipe(gulp.dest(MOZCENTRAL_EXTENSION_DIR)),
-        gulp
-          .src(FIREFOX_CONTENT_DIR + "PdfJsDefaultPreferences.sys.mjs", {
-            encoding: false,
-          })
-          .pipe(transform("utf8", preprocessDefaultPreferences))
-          .pipe(gulp.dest(MOZCENTRAL_CONTENT_DIR)),
+        createDefaultPrefsFile().pipe(gulp.dest(MOZCENTRAL_EXTENSION_DIR)),
       ]);
     }
   )
@@ -2076,8 +2074,19 @@ gulp.task(
       console.log();
       console.log("### Starting local server");
 
+      let port = 8888;
+      const i = process.argv.indexOf("--port");
+      if (i >= 0 && i + 1 < process.argv.length) {
+        const p = parseInt(process.argv[i + 1], 10);
+        if (!isNaN(p)) {
+          port = p;
+        } else {
+          console.error("Invalid port number: using default (8888)");
+        }
+      }
+
       const { WebServer } = await import("./test/webserver.mjs");
-      const server = new WebServer({ port: 8888 });
+      const server = new WebServer({ port });
       server.start();
     }
   )
@@ -2204,7 +2213,7 @@ function packageJson() {
     license: DIST_LICENSE,
     optionalDependencies: {
       canvas: "^2.11.2",
-      path2d: "^0.2.0",
+      path2d: "^0.2.1",
     },
     browser: {
       canvas: false,
@@ -2215,11 +2224,12 @@ function packageJson() {
     },
     repository: {
       type: "git",
-      url: DIST_REPO_URL,
+      url: `git+https://github.com/mozilla/pdf.js.git`,
     },
     engines: {
       node: ">=18",
     },
+    scripts: {},
   };
 
   return createStringSource(
@@ -2229,7 +2239,7 @@ function packageJson() {
 }
 
 gulp.task(
-  "dist-pre",
+  "dist",
   gulp.series(
     "generic",
     "generic-legacy",
@@ -2357,7 +2367,7 @@ gulp.task(
 
 gulp.task(
   "dist-install",
-  gulp.series("dist-pre", function createDistInstall(done) {
+  gulp.series("dist", function createDistInstall(done) {
     let distPath = DIST_DIR;
     const opts = {};
     const installPath = process.env.PDFJS_INSTALL_PATH;
@@ -2366,47 +2376,6 @@ gulp.task(
       distPath = path.relative(installPath, distPath);
     }
     safeSpawnSync("npm", ["install", distPath], opts);
-    done();
-  })
-);
-
-gulp.task(
-  "dist",
-  gulp.series("dist-pre", function createDist(done) {
-    const VERSION = getVersionJSON().version;
-
-    console.log();
-    console.log("### Committing changes");
-
-    let reason = process.env.PDFJS_UPDATE_REASON;
-    // Attempt to work-around the broken link, see https://github.com/mozilla/pdf.js/issues/10391
-    if (typeof reason === "string") {
-      const reasonParts =
-        /^(See )(mozilla\/pdf\.js)@tags\/(v\d+\.\d+\.\d+)\s*$/.exec(reason);
-
-      if (reasonParts) {
-        reason =
-          reasonParts[1] +
-          "https://github.com/" +
-          reasonParts[2] +
-          "/releases/tag/" +
-          reasonParts[3];
-      }
-    }
-    const message =
-      "PDF.js version " + VERSION + (reason ? " - " + reason : "");
-    safeSpawnSync("git", ["add", "*"], { cwd: DIST_DIR });
-    safeSpawnSync("git", ["commit", "-am", message], { cwd: DIST_DIR });
-    safeSpawnSync("git", ["tag", "-a", "v" + VERSION, "-m", message], {
-      cwd: DIST_DIR,
-    });
-
-    console.log();
-    console.log("Done. Push with");
-    console.log(
-      "  cd " + DIST_DIR + "; git push --tags " + DIST_REPO_URL + " master"
-    );
-    console.log();
     done();
   })
 );

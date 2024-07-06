@@ -393,7 +393,7 @@ const PDFViewerApplication = {
     const { appConfig, externalServices, l10n } = this;
     let eventBus;
     if (typeof PDFJSDev !== "undefined" && PDFJSDev.test("MOZCENTRAL")) {
-      eventBus = new FirefoxEventBus(
+      eventBus = this.preferences.eventBus = new FirefoxEventBus(
         await this._allowedGlobalEventsPromise,
         externalServices,
         AppOptions.get("isInAutomation")
@@ -521,10 +521,6 @@ const PDFViewerApplication = {
 
     if (appConfig.annotationEditorParams) {
       if (annotationEditorMode !== AnnotationEditorType.DISABLE) {
-        if (AppOptions.get("enableStampEditor")) {
-          appConfig.toolbar?.editorStampButton?.classList.remove("hidden");
-        }
-
         const editorHighlightButton = appConfig.toolbar?.editorHighlightButton;
         if (editorHighlightButton && AppOptions.get("enableHighlightEditor")) {
           editorHighlightButton.hidden = false;
@@ -573,7 +569,11 @@ const PDFViewerApplication = {
           await this._nimbusDataPromise
         );
       } else {
-        this.toolbar = new Toolbar(appConfig.toolbar, eventBus);
+        this.toolbar = new Toolbar(
+          appConfig.toolbar,
+          eventBus,
+          AppOptions.get("toolbarDensity")
+        );
       }
     }
 
@@ -756,10 +756,11 @@ const PDFViewerApplication = {
   },
 
   get mlManager() {
+    const enableAltText = AppOptions.get("enableAltText");
     return shadow(
       this,
       "mlManager",
-      AppOptions.get("enableML") === true ? new MLManager() : null
+      enableAltText === true ? new MLManager({ enableAltText }) : null
     );
   },
 

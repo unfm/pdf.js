@@ -45,6 +45,7 @@ import {
   scrollIntoView,
   switchToEditor,
   waitForAnnotationEditorLayer,
+  waitForAnnotationModeChanged,
   waitForSelectedEditor,
   waitForSerialized,
   waitForStorageEntries,
@@ -987,6 +988,29 @@ describe("FreeText Editor", () => {
         pages.map(async ([browserName, page]) => {
           await switchToFreeText(page);
 
+          const isEditorWhite = editorRect =>
+            page.evaluate(rect => {
+              const canvas = document.querySelector(".canvasWrapper canvas");
+              const ctx = canvas.getContext("2d");
+              rect ||= {
+                x: 0,
+                y: 0,
+                width: canvas.width,
+                height: canvas.height,
+              };
+              const { data } = ctx.getImageData(
+                rect.x,
+                rect.y,
+                rect.width,
+                rect.height
+              );
+              return data.every(x => x === 0xff);
+            }, editorRect);
+
+          // The page has been re-rendered but with no freetext annotations.
+          let isWhite = await isEditorWhite();
+          expect(isWhite).withContext(`In ${browserName}`).toBeTrue();
+
           let editorIds = await getEditors(page, "freeText");
           expect(editorIds.length).withContext(`In ${browserName}`).toEqual(6);
 
@@ -1041,11 +1065,9 @@ describe("FreeText Editor", () => {
           // canvas.
           editorIds = await getEditors(page, "freeText");
           expect(editorIds.length).withContext(`In ${browserName}`).toEqual(1);
-          const hidden = await page.$eval(
-            "[data-annotation-id='26R'] canvas",
-            el => getComputedStyle(el).display === "none"
-          );
-          expect(hidden).withContext(`In ${browserName}`).toBeTrue();
+
+          isWhite = await isEditorWhite(editorRect);
+          expect(isWhite).withContext(`In ${browserName}`).toBeTrue();
 
           // Check we've now a div containing the text.
           const newDivText = await page.$eval(
@@ -1288,10 +1310,12 @@ describe("FreeText Editor", () => {
       await closePages(pages);
     });
 
-    it("must move an annotation", async () => {
+    it("must edit an annotation", async () => {
       await Promise.all(
         pages.map(async ([browserName, page]) => {
+          const modeChangedHandle = await waitForAnnotationModeChanged(page);
           await page.click("[data-annotation-id='26R']", { count: 2 });
+          await awaitPromise(modeChangedHandle);
           await page.waitForSelector(`${getEditorSelector(0)}-editor`);
 
           const [focusedId, editable] = await page.evaluate(() => {
@@ -1347,6 +1371,7 @@ describe("FreeText Editor", () => {
 
           // TODO: remove this when we switch to BiDi.
           await hover(page, "[data-annotation-id='23R']");
+
           // Wait for the popup to be displayed.
           await page.waitForFunction(
             () =>
@@ -1588,12 +1613,6 @@ describe("FreeText Editor", () => {
     it("must open an existing annotation and check that the position are good", async () => {
       await Promise.all(
         pages.map(async ([browserName, page]) => {
-          await switchToFreeText(page);
-
-          await page.evaluate(() => {
-            document.getElementById("editorFreeTextParamsToolbar").remove();
-          });
-
           const toBinary = buf => {
             for (let i = 0; i < buf.length; i += 4) {
               const gray =
@@ -1646,8 +1665,12 @@ describe("FreeText Editor", () => {
             return null;
           };
 
-          for (const n of [0, 1, 2, 3, 4]) {
-            const rect = await getRect(page, getEditorSelector(n));
+          const firstPixelsAnnotations = new Map();
+
+          // [26, 32, ...] are the annotation ids
+          for (const n of [26, 32, 42, 57, 35, 1]) {
+            const id = `${n}R`;
+            const rect = await getRect(page, `[data-annotation-id="${id}"]`);
             const editorPng = await page.screenshot({
               clip: rect,
               type: "png",
@@ -1658,33 +1681,33 @@ describe("FreeText Editor", () => {
               editorImage.width,
               editorImage.height
             );
+            firstPixelsAnnotations.set(id, { editorFirstPix, rect });
+          }
 
+          await switchToFreeText(page);
+
+          await page.evaluate(() => {
+            document.getElementById("editorFreeTextParamsToolbar").remove();
+          });
+
+          for (const n of [0, 1, 2, 3, 4]) {
             const annotationId = await page.evaluate(N => {
               const editor = document.getElementById(
                 `pdfjs_internal_editor_${N}`
               );
-              const annId = editor.getAttribute("annotation-id");
-              const annotation = document.querySelector(
-                `[data-annotation-id="${annId}"]`
-              );
-              editor.hidden = true;
-              annotation.hidden = false;
-              return annId;
+              return editor.getAttribute("annotation-id");
             }, n);
-            await page.waitForSelector(`${getEditorSelector(n)}[hidden]`);
-            await page.waitForSelector(
-              `[data-annotation-id="${annotationId}"]:not([hidden])`
-            );
-
-            const annotationPng = await page.screenshot({
+            const { editorFirstPix: annotationFirstPix, rect } =
+              firstPixelsAnnotations.get(annotationId);
+            const editorPng = await page.screenshot({
               clip: rect,
               type: "png",
             });
-            const annotationImage = PNG.sync.read(annotationPng);
-            const annotationFirstPix = getFirstPixel(
-              annotationImage.data,
-              annotationImage.width,
-              annotationImage.height
+            const editorImage = PNG.sync.read(editorPng);
+            const editorFirstPix = getFirstPixel(
+              editorImage.data,
+              editorImage.width,
+              editorImage.height
             );
 
             expect(
@@ -1719,12 +1742,6 @@ describe("FreeText Editor", () => {
     it("must open an existing rotated annotation and check that the position are good", async () => {
       await Promise.all(
         pages.map(async ([browserName, page]) => {
-          await switchToFreeText(page);
-
-          await page.evaluate(() => {
-            document.getElementById("editorFreeTextParamsToolbar").remove();
-          });
-
           const toBinary = buf => {
             for (let i = 0; i < buf.length; i += 4) {
               const gray =
@@ -1806,13 +1823,15 @@ describe("FreeText Editor", () => {
             return null;
           };
 
+          const firstPixelsAnnotations = new Map();
           for (const [n, start] of [
-            [0, "BL"],
-            [1, "BR"],
-            [2, "TR"],
-            [3, "TL"],
+            [17, "BL"],
+            [18, "BR"],
+            [19, "TR"],
+            [20, "TL"],
           ]) {
-            const rect = await getRect(page, getEditorSelector(n));
+            const id = `${n}R`;
+            const rect = await getRect(page, `[data-annotation-id="${id}"]`);
             const editorPng = await page.screenshot({
               clip: rect,
               type: "png",
@@ -1824,33 +1843,38 @@ describe("FreeText Editor", () => {
               editorImage.height,
               start
             );
+            firstPixelsAnnotations.set(id, { editorFirstPix, rect });
+          }
 
+          await switchToFreeText(page);
+
+          await page.evaluate(() => {
+            document.getElementById("editorFreeTextParamsToolbar").remove();
+          });
+
+          for (const [n, start] of [
+            [0, "BL"],
+            [1, "BR"],
+            [2, "TR"],
+            [3, "TL"],
+          ]) {
             const annotationId = await page.evaluate(N => {
               const editor = document.getElementById(
                 `pdfjs_internal_editor_${N}`
               );
-              const annId = editor.getAttribute("annotation-id");
-              const annotation = document.querySelector(
-                `[data-annotation-id="${annId}"]`
-              );
-              editor.hidden = true;
-              annotation.hidden = false;
-              return annId;
+              return editor.getAttribute("annotation-id");
             }, n);
-            await page.waitForSelector(`${getEditorSelector(n)}[hidden]`);
-            await page.waitForSelector(
-              `[data-annotation-id="${annotationId}"]:not([hidden])`
-            );
-
-            const annotationPng = await page.screenshot({
+            const { editorFirstPix: annotationFirstPix, rect } =
+              firstPixelsAnnotations.get(annotationId);
+            const editorPng = await page.screenshot({
               clip: rect,
               type: "png",
             });
-            const annotationImage = PNG.sync.read(annotationPng);
-            const annotationFirstPix = getFirstPixel(
-              annotationImage.data,
-              annotationImage.width,
-              annotationImage.height,
+            const editorImage = PNG.sync.read(editorPng);
+            const editorFirstPix = getFirstPixel(
+              editorImage.data,
+              editorImage.width,
+              editorImage.height,
               start
             );
 
@@ -3369,132 +3393,129 @@ describe("FreeText Editor", () => {
     });
 
     it("must check that pasting html just keep the text", async () => {
-      await Promise.all(
-        pages.map(async ([browserName, page]) => {
-          await switchToFreeText(page);
+      // Run sequentially to avoid clipboard issues.
+      for (const [browserName, page] of pages) {
+        await switchToFreeText(page);
 
-          const rect = await getRect(page, ".annotationEditorLayer");
+        const rect = await getRect(page, ".annotationEditorLayer");
 
-          let editorSelector = getEditorSelector(0);
-          const data = "Hello PDF.js World !!";
-          await page.mouse.click(rect.x + 100, rect.y + 100);
-          await page.waitForSelector(editorSelector, {
-            visible: true,
-          });
-          await page.type(`${editorSelector} .internal`, data);
-          const editorRect = await getRect(page, editorSelector);
+        let editorSelector = getEditorSelector(0);
+        const data = "Hello PDF.js World !!";
+        await page.mouse.click(rect.x + 100, rect.y + 100);
+        await page.waitForSelector(editorSelector, {
+          visible: true,
+        });
+        await page.type(`${editorSelector} .internal`, data);
+        const editorRect = await getRect(page, editorSelector);
 
-          // Commit.
-          await page.keyboard.press("Escape");
-          await page.waitForSelector(`${editorSelector} .overlay.enabled`);
+        // Commit.
+        await page.keyboard.press("Escape");
+        await page.waitForSelector(`${editorSelector} .overlay.enabled`);
 
-          const waitForTextChange = (previous, edSelector) =>
-            page.waitForFunction(
-              (prev, sel) => document.querySelector(sel).innerText !== prev,
-              {},
-              previous,
-              `${edSelector} .internal`
-            );
-          const getText = edSelector =>
-            page.$eval(`${edSelector} .internal`, el => el.innerText.trimEnd());
-
-          await page.mouse.click(
-            editorRect.x + editorRect.width / 2,
-            editorRect.y + editorRect.height / 2,
-            { count: 2 }
+        const waitForTextChange = (previous, edSelector) =>
+          page.waitForFunction(
+            (prev, sel) => document.querySelector(sel).innerText !== prev,
+            {},
+            previous,
+            `${edSelector} .internal`
           );
-          await page.waitForSelector(
-            `${editorSelector} .overlay:not(.enabled)`
+        const getText = edSelector =>
+          page.$eval(`${edSelector} .internal`, el => el.innerText.trimEnd());
+
+        await page.mouse.click(
+          editorRect.x + editorRect.width / 2,
+          editorRect.y + editorRect.height / 2,
+          { count: 2 }
+        );
+        await page.waitForSelector(`${editorSelector} .overlay:not(.enabled)`);
+
+        const select = position =>
+          page.evaluate(
+            (sel, pos) => {
+              const el = document.querySelector(sel);
+              document.getSelection().setPosition(el.firstChild, pos);
+            },
+            `${editorSelector} .internal`,
+            position
           );
 
-          const select = position =>
-            page.evaluate(
-              (sel, pos) => {
-                const el = document.querySelector(sel);
-                document.getSelection().setPosition(el.firstChild, pos);
-              },
-              `${editorSelector} .internal`,
-              position
-            );
+        await select(0);
+        await copyToClipboard(page, {
+          "text/html": "<b>Bold Foo</b>",
+          "text/plain": "Foo",
+        });
+        await pasteFromClipboard(page, `${editorSelector} .internal`);
 
-          await select(0);
-          await copyToClipboard(page, {
-            "text/html": "<b>Bold Foo</b>",
-            "text/plain": "Foo",
-          });
-          await pasteFromClipboard(page, `${editorSelector} .internal`);
+        let lastText = data;
 
-          let lastText = data;
+        await waitForTextChange(lastText, editorSelector);
+        let text = await getText(editorSelector);
+        lastText = `Foo${data}`;
+        expect(text).withContext(`In ${browserName}`).toEqual(lastText);
 
-          await waitForTextChange(lastText, editorSelector);
-          let text = await getText(editorSelector);
-          lastText = `Foo${data}`;
-          expect(text).withContext(`In ${browserName}`).toEqual(lastText);
+        await select(3);
+        await copyToClipboard(page, {
+          "text/html": "<b>Bold Bar</b><br><b>Oof</b>",
+          "text/plain": "Bar\nOof",
+        });
+        await pasteFromClipboard(page, `${editorSelector} .internal`);
 
-          await select(3);
-          await copyToClipboard(page, {
-            "text/html": "<b>Bold Bar</b><br><b>Oof</b>",
-            "text/plain": "Bar\nOof",
-          });
-          await pasteFromClipboard(page, `${editorSelector} .internal`);
+        await waitForTextChange(lastText, editorSelector);
+        text = await getText(editorSelector);
+        lastText = `FooBar\nOof${data}`;
+        expect(text).withContext(`In ${browserName}`).toEqual(lastText);
 
-          await waitForTextChange(lastText, editorSelector);
-          text = await getText(editorSelector);
-          lastText = `FooBar\nOof${data}`;
-          expect(text).withContext(`In ${browserName}`).toEqual(lastText);
+        await select(0);
+        await copyToClipboard(page, { "text/html": "<b>basic html</b>" });
+        await pasteFromClipboard(page, `${editorSelector} .internal`);
 
-          await select(0);
-          await copyToClipboard(page, { "text/html": "<b>basic html</b>" });
-          await pasteFromClipboard(page, `${editorSelector} .internal`);
+        // Nothing should change, so it's hard to wait on something.
+        // eslint-disable-next-line no-restricted-syntax
+        await waitForTimeout(100);
 
-          // Nothing should change, so it's hard to wait on something.
-          // eslint-disable-next-line no-restricted-syntax
-          await waitForTimeout(100);
+        text = await getText(editorSelector);
+        expect(text).withContext(`In ${browserName}`).toEqual(lastText);
 
-          text = await getText(editorSelector);
-          expect(text).withContext(`In ${browserName}`).toEqual(lastText);
+        const getHTML = () =>
+          page.$eval(`${editorSelector} .internal`, el => el.innerHTML);
+        const prevHTML = await getHTML();
 
-          const getHTML = () =>
-            page.$eval(`${editorSelector} .internal`, el => el.innerHTML);
-          const prevHTML = await getHTML();
+        // Try to paste an image.
+        await copyToClipboard(page, {
+          "image/png":
+            // 1x1 transparent png.
+            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+        });
+        await pasteFromClipboard(page, `${editorSelector} .internal`);
 
-          // Try to paste an image.
-          await copyToClipboard(page, {
-            "image/png":
-              // 1x1 transparent png.
-              "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
-          });
-          await pasteFromClipboard(page, `${editorSelector} .internal`);
+        // Nothing should change, so it's hard to wait on something.
+        // eslint-disable-next-line no-restricted-syntax
+        await waitForTimeout(100);
 
-          // Nothing should change, so it's hard to wait on something.
-          // eslint-disable-next-line no-restricted-syntax
-          await waitForTimeout(100);
+        const html = await getHTML();
+        expect(html).withContext(`In ${browserName}`).toEqual(prevHTML);
 
-          const html = await getHTML();
-          expect(html).withContext(`In ${browserName}`).toEqual(prevHTML);
+        // Commit.
+        await page.keyboard.press("Escape");
+        await page.waitForSelector(`${editorSelector} .overlay.enabled`);
 
-          // Commit.
-          await page.keyboard.press("Escape");
-          await page.waitForSelector(`${editorSelector} .overlay.enabled`);
+        editorSelector = getEditorSelector(1);
+        await page.mouse.click(rect.x + 200, rect.y + 200);
+        await page.waitForSelector(editorSelector, {
+          visible: true,
+        });
 
-          editorSelector = getEditorSelector(1);
-          await page.mouse.click(rect.x + 200, rect.y + 200);
-          await page.waitForSelector(editorSelector, {
-            visible: true,
-          });
+        const fooBar = "Foo\nBar\nOof";
+        await copyToClipboard(page, {
+          "text/html": "<b>html</b>",
+          "text/plain": fooBar,
+        });
+        await pasteFromClipboard(page, `${editorSelector} .internal`);
 
-          const fooBar = "Foo\nBar\nOof";
-          await copyToClipboard(page, {
-            "text/html": "<b>html</b>",
-            "text/plain": fooBar,
-          });
-          await pasteFromClipboard(page, `${editorSelector} .internal`);
-
-          await waitForTextChange("", editorSelector);
-          text = await getText(editorSelector);
-          expect(text).withContext(`In ${browserName}`).toEqual(fooBar);
-        })
-      );
+        await waitForTextChange("", editorSelector);
+        text = await getText(editorSelector);
+        expect(text).withContext(`In ${browserName}`).toEqual(fooBar);
+      }
     });
   });
 
@@ -3555,13 +3576,6 @@ describe("FreeText Editor", () => {
             );
           }
 
-          await page.waitForSelector("[data-annotation-id='998R'] canvas");
-          let hidden = await page.$eval(
-            "[data-annotation-id='998R'] canvas",
-            el => getComputedStyle(el).display === "none"
-          );
-          expect(hidden).withContext(`In ${browserName}`).toBeTrue();
-
           // Check we've now a div containing the text.
           await page.waitForSelector(
             "[data-annotation-id='998R'] div.annotationContent"
@@ -3573,6 +3587,24 @@ describe("FreeText Editor", () => {
           expect(newDivText)
             .withContext(`In ${browserName}`)
             .toEqual("Hello World and edited in Firefox");
+
+          // Check that the canvas has nothing drawn at the annotation position.
+          await page.$eval(
+            "[data-annotation-id='998R']",
+            el => (el.hidden = true)
+          );
+          let editorPng = await page.screenshot({
+            clip: editorRect,
+            type: "png",
+          });
+          await page.$eval(
+            "[data-annotation-id='998R']",
+            el => (el.hidden = false)
+          );
+          let editorImage = PNG.sync.read(editorPng);
+          expect(editorImage.data.every(x => x === 0xff))
+            .withContext(`In ${browserName}`)
+            .toBeTrue();
 
           const oneToThirteen = Array.from(new Array(13).keys(), n => n + 2);
           for (const pageNumber of oneToThirteen) {
@@ -3590,6 +3622,19 @@ describe("FreeText Editor", () => {
           await switchToFreeText(page, /* disable = */ true);
 
           const thirteenToOne = Array.from(new Array(13).keys(), n => 13 - n);
+          const handlePromise = await createPromise(page, resolve => {
+            const callback = e => {
+              if (e.source.id === 1) {
+                window.PDFViewerApplication.eventBus.off(
+                  "pagerendered",
+                  callback
+                );
+                resolve();
+              }
+            };
+            window.PDFViewerApplication.eventBus.on("pagerendered", callback);
+          });
+
           for (const pageNumber of thirteenToOne) {
             await scrollIntoView(
               page,
@@ -3597,12 +3642,16 @@ describe("FreeText Editor", () => {
             );
           }
 
-          await page.waitForSelector("[data-annotation-id='998R'] canvas");
-          hidden = await page.$eval(
-            "[data-annotation-id='998R'] canvas",
-            el => getComputedStyle(el).display === "none"
-          );
-          expect(hidden).withContext(`In ${browserName}`).toBeFalse();
+          await awaitPromise(handlePromise);
+
+          editorPng = await page.screenshot({
+            clip: editorRect,
+            type: "png",
+          });
+          editorImage = PNG.sync.read(editorPng);
+          expect(editorImage.data.every(x => x === 0xff))
+            .withContext(`In ${browserName}`)
+            .toBeFalse();
         })
       );
     });

@@ -17,6 +17,7 @@ import {
   awaitPromise,
   clearInput,
   closePages,
+  closeSinglePage,
   getAnnotationStorage,
   getComputedStyleSelector,
   getFirstSerialized,
@@ -418,41 +419,37 @@ describe("Interaction", () => {
       pages = await loadAndWait("doc_actions.pdf", getSelector("47R"));
     });
 
-    afterAll(async () => {
-      await closePages(pages);
-    });
-
     it("must execute WillPrint and DidPrint actions", async () => {
-      await Promise.all(
-        pages.map(async ([browserName, page]) => {
-          if (process.platform === "win32" && browserName === "firefox") {
-            pending("Disabled in Firefox on Windows, because of bug 1662471.");
+      // Run the tests sequentially to avoid to use the same printer at the same
+      // time.
+      // And to make sure that a printer isn't locked by a process we close the
+      // page before running the next test.
+      for (const [browserName, page] of pages) {
+        await page.waitForFunction(
+          "window.PDFViewerApplication.scriptingReady === true"
+        );
+
+        await clearInput(page, getSelector("47R"));
+        await page.evaluate(_ => {
+          window.document.activeElement.blur();
+        });
+        await page.waitForFunction(`${getQuerySelector("47R")}.value === ""`);
+
+        const text = await actAndWaitForInput(
+          page,
+          getSelector("47R"),
+          async () => {
+            await page.click("#print");
           }
-          await page.waitForFunction(
-            "window.PDFViewerApplication.scriptingReady === true"
-          );
+        );
+        expect(text).withContext(`In ${browserName}`).toEqual("WillPrint");
+        await page.keyboard.press("Escape");
 
-          await clearInput(page, getSelector("47R"));
-          await page.evaluate(_ => {
-            window.document.activeElement.blur();
-          });
-          await page.waitForFunction(`${getQuerySelector("47R")}.value === ""`);
-
-          let text = await actAndWaitForInput(
-            page,
-            getSelector("47R"),
-            async () => {
-              await page.click("#print");
-            }
-          );
-          expect(text).withContext(`In ${browserName}`).toEqual("WillPrint");
-
-          await page.waitForFunction(`${getQuerySelector("50R")}.value !== ""`);
-
-          text = await page.$eval(getSelector("50R"), el => el.value);
-          expect(text).withContext(`In ${browserName}`).toEqual("DidPrint");
-        })
-      );
+        await page.waitForFunction(
+          `${getQuerySelector("50R")}.value === "DidPrint"`
+        );
+        await closeSinglePage(page);
+      }
     });
   });
 
@@ -1538,49 +1535,35 @@ describe("Interaction", () => {
 
     it("must check that charLimit is correctly set", async () => {
       await Promise.all(
-        pages.map(async ([browserName, page]) => {
+        pages.map(async ([, page]) => {
           await page.waitForFunction(
             "window.PDFViewerApplication.scriptingReady === true"
           );
 
-          await clearInput(page, getSelector("7R"));
-          // By default the charLimit is 0 which means that the input
-          // length is unlimited.
-          await page.type(getSelector("7R"), "abcdefghijklmnopq", {
-            delay: 10,
-          });
-
-          let value = await page.$eval(getSelector("7R"), el => el.value);
-          expect(value)
-            .withContext(`In ${browserName}`)
-            .toEqual("abcdefghijklmnopq");
-
-          // charLimit is set to 1
-          await page.click(getSelector("9R"));
-
+          // The default charLimit is 0, which indicates unlimited text length.
+          await page.type(getSelector("7R"), "abcdefghij", { delay: 10 });
           await page.waitForFunction(
-            `document.querySelector('${getSelector(
-              "7R"
-            )}').value !== "abcdefgh"`
+            `${getQuerySelector("7R")}.value === "abcdefghij"`
           );
 
-          value = await page.$eval(getSelector("7R"), el => el.value);
-          expect(value).withContext(`In ${browserName}`).toEqual("a");
-
-          await clearInput(page, getSelector("7R"));
-          await page.type(getSelector("7R"), "xyz", { delay: 10 });
-
-          value = await page.$eval(getSelector("7R"), el => el.value);
-          expect(value).withContext(`In ${browserName}`).toEqual("x");
-
-          // charLimit is set to 2
+          // Increase the charLimit to 1 (this truncates the existing text).
           await page.click(getSelector("9R"));
+          await waitForSandboxTrip(page);
+          await page.waitForFunction(`${getQuerySelector("7R")}.value === "a"`);
 
           await clearInput(page, getSelector("7R"));
           await page.type(getSelector("7R"), "xyz", { delay: 10 });
+          await page.waitForFunction(`${getQuerySelector("7R")}.value === "x"`);
 
-          value = await page.$eval(getSelector("7R"), el => el.value);
-          expect(value).withContext(`In ${browserName}`).toEqual("xy");
+          // Increase the charLimit to 2.
+          await page.click(getSelector("9R"));
+          await waitForSandboxTrip(page);
+
+          await clearInput(page, getSelector("7R"));
+          await page.type(getSelector("7R"), "xyz", { delay: 10 });
+          await page.waitForFunction(
+            `${getQuerySelector("7R")}.value === "xy"`
+          );
         })
       );
     });
@@ -1789,17 +1772,19 @@ describe("Interaction", () => {
       pages = await loadAndWait(
         "autoprint.pdf",
         "",
-        null /* pageSetup = */,
+        null /* zoom = */,
         async page => {
           printHandles.set(
             page,
-            await page.evaluateHandle(() => [
+            page.evaluateHandle(() => [
               new Promise(resolve => {
                 globalThis.printResolve = resolve;
               }),
             ])
           );
           await page.waitForFunction(() => {
+            // We don't really need to print the document.
+            window.print = () => {};
             if (!window.PDFViewerApplication?.eventBus) {
               return false;
             }
@@ -1826,7 +1811,7 @@ describe("Interaction", () => {
     it("must check if printing is triggered when the document is open", async () => {
       await Promise.all(
         pages.map(async ([browserName, page]) => {
-          await awaitPromise(printHandles.get(page));
+          await awaitPromise(await printHandles.get(page));
         })
       );
     });
@@ -2452,6 +2437,60 @@ describe("Interaction", () => {
             expect(text).withContext(`In ${browserName}`).toEqual(expected);
             await clearInput(page, getSelector("10R"));
           }
+        })
+      );
+    });
+  });
+
+  describe("PageOpen and PageClose actions in fields", () => {
+    let pages;
+    let otherPages;
+
+    beforeAll(async () => {
+      otherPages = await Promise.all(
+        global.integrationSessions.map(async session =>
+          session.browser.newPage()
+        )
+      );
+      pages = await loadAndWait("issue18305.pdf", getSelector("7R"));
+    });
+
+    afterAll(async () => {
+      await closePages(pages);
+      await Promise.all(otherPages.map(page => page.close()));
+    });
+
+    it("must check that PageOpen/PageClose actions are correctly executed", async () => {
+      await Promise.all(
+        pages.map(async ([browserName, page], i) => {
+          await page.waitForFunction(
+            "window.PDFViewerApplication.scriptingReady === true"
+          );
+
+          const buttonSelector = `[data-annotation-id="25R"`;
+          await page.waitForSelector(buttonSelector, {
+            timeout: 0,
+          });
+
+          const inputSelector = getSelector("7R");
+          let text = await page.$eval(inputSelector, el => el.value);
+          expect(text).withContext(`In ${browserName}`).toEqual("");
+
+          text = await actAndWaitForInput(
+            page,
+            inputSelector,
+            () => scrollIntoView(page, buttonSelector),
+            false
+          );
+          expect(text).withContext(`In ${browserName}`).toEqual("PageOpen");
+
+          text = await actAndWaitForInput(
+            page,
+            inputSelector,
+            () => scrollIntoView(page, inputSelector),
+            false
+          );
+          expect(text).withContext(`In ${browserName}`).toEqual("PageClose");
         })
       );
     });
