@@ -1,4 +1,4 @@
-FROM lipanski/docker-static-website:latest
+FROM halverneus/static-file-server:latest
 
 # Copy your static files
-COPY website .
+COPY website /web
