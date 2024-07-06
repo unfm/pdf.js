@@ -80,8 +80,9 @@ jobs:
 
       - name: Uncompress website
         run: |
-          tar -xvf website.tar -C website
-          ls website
+          ls
+          tar -xvf website.tar
+          ls
       
       - name: Docker meta
         id: meta
