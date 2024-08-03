@@ -173,7 +173,7 @@ async function getSpanRectFromText(page, pageNumber, text) {
   return page.evaluate(
     (number, content) => {
       for (const el of document.querySelectorAll(
-        `.page[data-page-number="${number}"] > .textLayer > span`
+        `.page[data-page-number="${number}"] > .textLayer span:not(:has(> span))`
       )) {
         if (el.textContent === content) {
           const { x, y, width, height } = el.getBoundingClientRect();
@@ -511,6 +511,24 @@ async function hover(page, selector) {
   await page.mouse.move(rect.x + rect.width / 2, rect.y + rect.height / 2);
 }
 
+async function setCaretAt(page, pageNumber, text, position) {
+  await page.evaluate(
+    (pageN, string, pos) => {
+      for (const el of document.querySelectorAll(
+        `.page[data-page-number="${pageN}"] > .textLayer > span`
+      )) {
+        if (el.textContent === string) {
+          window.getSelection().setPosition(el.firstChild, pos);
+          break;
+        }
+      }
+    },
+    pageNumber,
+    text,
+    position
+  );
+}
+
 const modifier = isMac ? "Meta" : "Control";
 async function kbCopy(page) {
   await page.keyboard.down(modifier);
@@ -713,6 +731,7 @@ export {
   pasteFromClipboard,
   scrollIntoView,
   serializeBitmapDimensions,
+  setCaretAt,
   switchToEditor,
   waitForAnnotationEditorLayer,
   waitForAnnotationModeChanged,

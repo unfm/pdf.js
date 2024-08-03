@@ -55,6 +55,26 @@
       "type": "boolean",
       "default": false
     },
+    "enableGuessAltText": {
+      "type": "boolean",
+      "default": true
+    },
+    "enableAltTextModelDownload": {
+      "type": "boolean",
+      "default": true
+    },
+    "enableNewAltTextWhenAddingImage": {
+      "type": "boolean",
+      "default": true
+    },
+    "altTextLearnMoreUrl": {
+      "type": "string",
+      "default": ""
+    },
+    "enableUpdatedAddImage": {
+      "type": "boolean",
+      "default": false
+    },
     "cursorToolOnLoad": {
       "title": "Cursor tool on load",
       "description": "The cursor tool that is enabled upon load.\n 0 = Text selection tool.\n 1 = Hand tool.",

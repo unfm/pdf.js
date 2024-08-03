@@ -219,6 +219,10 @@ class PDFViewer {
 
   #enablePermissions = false;
 
+  #enableUpdatedAddImage = false;
+
+  #enableNewAltTextWhenAddingImage = false;
+
   #eventAbortController = null;
 
   #mlManager = null;
@@ -291,6 +295,9 @@ class PDFViewer {
       options.annotationEditorHighlightColors || null;
     this.#enableHighlightFloatingButton =
       options.enableHighlightFloatingButton === true;
+    this.#enableUpdatedAddImage = options.enableUpdatedAddImage === true;
+    this.#enableNewAltTextWhenAddingImage =
+      options.enableNewAltTextWhenAddingImage === true;
     this.imageResourcesPath = options.imageResourcesPath || "";
     this.enablePrintAutoRotate = options.enablePrintAutoRotate || false;
     if (typeof PDFJSDev === "undefined" || PDFJSDev.test("GENERIC")) {
@@ -890,6 +897,8 @@ class PDFViewer {
               pageColors,
               this.#annotationEditorHighlightColors,
               this.#enableHighlightFloatingButton,
+              this.#enableUpdatedAddImage,
+              this.#enableNewAltTextWhenAddingImage,
               this.#mlManager
             );
             eventBus.dispatch("annotationeditoruimanager", {
@@ -897,6 +906,9 @@ class PDFViewer {
               uiManager: this.#annotationEditorUIManager,
             });
             if (mode !== AnnotationEditorType.NONE) {
+              if (mode === AnnotationEditorType.STAMP) {
+                this.#mlManager?.loadModel("altText");
+              }
               this.#annotationEditorUIManager.updateMode(mode);
             }
           } else {
@@ -2302,16 +2314,19 @@ class PDFViewer {
     if (!this.pdfDocument) {
       return;
     }
+    if (mode === AnnotationEditorType.STAMP) {
+      this.#mlManager?.loadModel("altText");
+    }
 
     const { eventBus } = this;
     const updater = () => {
       this.#cleanupSwitchAnnotationEditorMode();
       this.#annotationEditorMode = mode;
+      this.#annotationEditorUIManager.updateMode(mode, editId, isFromKeyboard);
       eventBus.dispatch("annotationeditormodechanged", {
         source: this,
         mode,
       });
-      this.#annotationEditorUIManager.updateMode(mode, editId, isFromKeyboard);
     };
 
     if (
@@ -2328,9 +2343,9 @@ class PDFViewer {
       // We must call #switchToEditAnnotationMode unconditionally to ensure that
       // page is rendered if it's useful or not.
       const idsToRefresh = this.#switchToEditAnnotationMode();
-      if (isEditing && editId && idsToRefresh) {
-        // We're editing an existing annotation so we must switch to editing
-        // mode when the rendering is done.
+      if (isEditing && idsToRefresh) {
+        // We're editing so we must switch to editing mode when the rendering is
+        // done.
         this.#cleanupSwitchAnnotationEditorMode();
         this.#onPageRenderedCallback = ({ pageNumber }) => {
           idsToRefresh.delete(pageNumber);

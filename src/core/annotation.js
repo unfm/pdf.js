@@ -42,12 +42,12 @@ import {
   escapeString,
   getInheritableProperty,
   getRotationMatrix,
-  isAscii,
   isNumberArray,
   lookupMatrix,
   lookupNormalRect,
   lookupRect,
   numberToString,
+  stringToAsciiOrUTF16BE,
   stringToUTF16String,
 } from "./core_utils.js";
 import {
@@ -1711,18 +1711,28 @@ class MarkupAnnotation extends Annotation {
   }
 
   static async createNewAnnotation(xref, annotation, dependencies, params) {
-    const annotationRef = (annotation.ref ||= xref.getNewTemporaryRef());
+    let oldAnnotation;
+    if (annotation.ref) {
+      oldAnnotation = (await xref.fetchIfRefAsync(annotation.ref)).clone();
+    } else {
+      annotation.ref = xref.getNewTemporaryRef();
+    }
+
+    const annotationRef = annotation.ref;
     const ap = await this.createNewAppearanceStream(annotation, xref, params);
     const buffer = [];
     let annotationDict;
 
     if (ap) {
       const apRef = xref.getNewTemporaryRef();
-      annotationDict = this.createNewDict(annotation, xref, { apRef });
+      annotationDict = this.createNewDict(annotation, xref, {
+        apRef,
+        oldAnnotation,
+      });
       await writeObject(apRef, ap, buffer, xref);
       dependencies.push({ ref: apRef, data: buffer.join("") });
     } else {
-      annotationDict = this.createNewDict(annotation, xref, {});
+      annotationDict = this.createNewDict(annotation, xref, { oldAnnotation });
     }
     if (Number.isInteger(annotation.parentTreeId)) {
       annotationDict.set("StructParent", annotation.parentTreeId);
@@ -2123,9 +2133,12 @@ class WidgetAnnotation extends Annotation {
       value,
     };
 
-    const encoder = val =>
-      isAscii(val) ? val : stringToUTF16String(val, /* bigEndian = */ true);
-    dict.set("V", Array.isArray(value) ? value.map(encoder) : encoder(value));
+    dict.set(
+      "V",
+      Array.isArray(value)
+        ? value.map(stringToAsciiOrUTF16BE)
+        : stringToAsciiOrUTF16BE(value)
+    );
     this.amendSavedDict(annotationStorage, dict);
 
     const maybeMK = this._getMKDict(rotation);
@@ -3826,30 +3839,29 @@ class FreeTextAnnotation extends MarkupAnnotation {
     return this._hasAppearance;
   }
 
-  static createNewDict(annotation, xref, { apRef, ap }) {
+  static createNewDict(annotation, xref, { apRef, ap, oldAnnotation }) {
     const { color, fontSize, rect, rotation, user, value } = annotation;
-    const freetext = new Dict(xref);
+    const freetext = oldAnnotation || new Dict(xref);
     freetext.set("Type", Name.get("Annot"));
     freetext.set("Subtype", Name.get("FreeText"));
-    freetext.set("CreationDate", `D:${getModificationDate()}`);
+    if (oldAnnotation) {
+      freetext.set("M", `D:${getModificationDate()}`);
+      // TODO: We should try to generate a new RC from the content we've.
+      // For now we can just remove it to avoid any issues.
+      freetext.delete("RC");
+    } else {
+      freetext.set("CreationDate", `D:${getModificationDate()}`);
+    }
     freetext.set("Rect", rect);
     const da = `/Helv ${fontSize} Tf ${getPdfColor(color, /* isFill */ true)}`;
     freetext.set("DA", da);
-    freetext.set(
-      "Contents",
-      isAscii(value)
-        ? value
-        : stringToUTF16String(value, /* bigEndian = */ true)
-    );
+    freetext.set("Contents", stringToAsciiOrUTF16BE(value));
     freetext.set("F", 4);
     freetext.set("Border", [0, 0, 0]);
     freetext.set("Rotate", rotation);
 
     if (user) {
-      freetext.set(
-        "T",
-        isAscii(user) ? user : stringToUTF16String(user, /* bigEndian = */ true)
-      );
+      freetext.set("T", stringToAsciiOrUTF16BE(user));
     }
 
     if (apRef || ap) {
@@ -4583,10 +4595,7 @@ class HighlightAnnotation extends MarkupAnnotation {
     highlight.set("CA", opacity);
 
     if (user) {
-      highlight.set(
-        "T",
-        isAscii(user) ? user : stringToUTF16String(user, /* bigEndian = */ true)
-      );
+      highlight.set("T", stringToAsciiOrUTF16BE(user));
     }
 
     if (apRef || ap) {
@@ -4868,10 +4877,7 @@ class StampAnnotation extends MarkupAnnotation {
     stamp.set("Rotate", rotation);
 
     if (user) {
-      stamp.set(
-        "T",
-        isAscii(user) ? user : stringToUTF16String(user, /* bigEndian = */ true)
-      );
+      stamp.set("T", stringToAsciiOrUTF16BE(user));
     }
 
     if (apRef || ap) {
